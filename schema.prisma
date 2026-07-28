@@ -1,0 +1,198 @@
+// ============================================================
+// schema.prisma — متجر "التنوع الراقي"
+// قاعدة بيانات ديناميكية: أي قسم جديد أو خيار جديد يُضاف
+// من لوحة التحكم دون أي تعديل على الكود (JSON-driven schema)
+// ============================================================
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+// ---------- الهوية والثيم ----------
+model StoreSettings {
+  id            String   @id @default(cuid())
+  storeName     String   @default("التنوع الراقي")
+  logoUrl       String?
+  primaryColor  String   @default("#3D1F3D")
+  secondaryColor String  @default("#C9A227")
+  bgColor       String   @default("#FAF6F0")
+  whatsappNumber String?
+  adminEmail    String
+  updatedAt     DateTime @updatedAt
+}
+
+// ---------- حسابات الإدارة والموظفين (RBAC حقيقي) ----------
+// المالك (OWNER) له كل الصلاحيات دائماً. الموظف (STAFF) صلاحياته
+// مقيّدة بمصفوفة permissions التي يحددها المالك من لوحة التحكم.
+model StaffUser {
+  id           String     @id @default(cuid())
+  name         String
+  email        String     @unique
+  passwordHash String
+  role         StaffRole  @default(STAFF)
+  // مثال: ["products:write", "orders:write", "settings:write"]
+  // المالك (OWNER) يتجاوز هذه القائمة دائماً بكل الصلاحيات
+  permissions  String[]
+  isActive     Boolean    @default(true)
+  createdAt    DateTime   @default(now())
+  auditLogs    AuditLog[]
+}
+
+enum StaffRole {
+  OWNER
+  STAFF
+}
+
+// سجل مراقبة: من فعل ماذا ومتى — لمراجعة المالك لعمليات الموظفين
+model AuditLog {
+  id         String    @id @default(cuid())
+  staffId    String
+  staff      StaffUser @relation(fields: [staffId], references: [id])
+  action     String    // مثال: "product.delete", "order.status_update"
+  targetType String    // مثال: "Product", "Order"
+  targetId   String?
+  details    Json?
+  createdAt  DateTime  @default(now())
+
+  @@index([staffId])
+  @@index([createdAt])
+}
+
+// ---------- الكتللوجات (الأقسام) ----------
+// كل كتلوج يحدد "نوع سلوك الخيارات" الخاص به عبر optionsSchema (JSON)
+// هذا هو ما يجعل النظام No-Code: الإدارة تبني القسم بدون كود.
+model Catalog {
+  id            String    @id @default(cuid())
+  name          String    // مثال: "ملابس فري سايز", "إكسسوارات", "ساعات بالاسم"
+  slug          String    @unique
+  type          CatalogType
+  // مخطط الخيارات الديناميكي لهذا القسم (يُبنى من لوحة التحكم كـ JSON)
+  // مثال لكتلوج "ساعات بالاسم":
+  // { "requiresEngraveName": true, "allowedColors": ["ذهبي","فضي"], "sizePicker": false }
+  optionsSchema Json
+  isActive      Boolean   @default(true)
+  sortOrder     Int       @default(0)
+  products      Product[]
+  createdAt     DateTime  @default(now())
+}
+
+enum CatalogType {
+  FREE_SIZE_CLOTHING          // فري سايز مقفول
+  MULTI_SIZE_CLOTHING         // مقاسات متعددة + ألوان
+  ACCESSORIES                 // مقاسات/مليمترات مخصصة + ملاحظات
+  COSMETICS                   // كمية + حجم (كبير/صغير) مع وزن تلقائي
+  ENGRAVED_GIFTS               // ساعات بالاسم
+  CUSTOM_TAILORING             // عبايات/دروع/فساتين تفصيل
+}
+
+// ---------- المنتجات ----------
+model Product {
+  id            String   @id @default(cuid())
+  catalogId     String
+  catalog       Catalog  @relation(fields: [catalogId], references: [id])
+  title         String
+  description   String
+  images        String[] // حتى 10 صور عالية الدقة
+  priceOriginal  Decimal  // السعر الرسمي (يُعرض مشطوباً)
+  priceFinal     Decimal  // السعر بعد الخصم
+  stock         Int      @default(0)
+
+  // خيارات ديناميكية خاصة بهذا المنتج (تتوافق مع optionsSchema الخاص بالكتلوج)
+  // مثال: { "colors": ["أحمر","أسود"], "sizes": ["S","M","L"], "cosmeticSizes":[{"label":"كبير","weight":"500 مل"},{"label":"صغير","weight":"250 مل"}] }
+  optionsData   Json
+
+  // SEO / أرشفة جوجل
+  seoTags       String[] // أكثر من 15 اسم مرادف وكلمة مفتاحية
+  seoSchemaJson Json?    // Schema.org Product markup جاهز للحقن في <head>
+
+  isActive      Boolean  @default(true)
+  createdAt     DateTime @default(now())
+  orderItems    OrderItem[]
+
+  @@index([catalogId])
+  @@index([seoTags])
+}
+
+// ---------- العملاء وتسجيل الدخول عبر OTP ----------
+model Customer {
+  id          String   @id @default(cuid())
+  phone       String   @unique
+  name        String?
+  email       String?
+  otpCode     String?
+  otpExpires  DateTime?
+  isVerified  Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  orders      Order[]
+  coupons     Coupon[]
+}
+
+// ---------- الطلبات ----------
+model Order {
+  id             String      @id @default(cuid())
+  customerId     String
+  customer       Customer    @relation(fields: [customerId], references: [id])
+  items          OrderItem[]
+  totalAmount    Decimal
+  status         OrderStatus @default(PENDING)
+
+  // بيانات الدفع اليمني
+  paymentMethod  PaymentMethod
+  paymentProofUrl String?    // صورة سند التحويل
+  transactionNumber String?  // أو رقم العملية
+
+  createdAt      DateTime    @default(now())
+  emailSentAt    DateTime?
+}
+
+enum OrderStatus {
+  PENDING
+  CONFIRMED
+  PROCESSING
+  SHIPPED
+  DELIVERED
+  CANCELLED
+}
+
+enum PaymentMethod {
+  KURAIMI_CASH     // حاسب - بنك الكريمي
+  TADHAMON_JAIB    // جيب - بنك التضامن
+  FLOUSAK
+  MONEY
+  MAHFAZATI
+  OTHER_WALLET
+}
+
+// كل عنصر طلب يحفظ "لقطة" من الخيارات التي اختارها العميل تحديداً
+model OrderItem {
+  id           String   @id @default(cuid())
+  orderId      String
+  order        Order    @relation(fields: [orderId], references: [id])
+  productId    String
+  product      Product  @relation(fields: [productId], references: [id])
+  quantity     Int      @default(1)
+
+  // لقطة الخيارات المختارة وقت الشراء — يشمل حسب النوع:
+  // اللون، المقاس، اسم الحفر/الطباعة، ملاحظات العميل، تفاصيل التفصيل (قماش/خياطة/مقاس مخصص)
+  selectedOptions Json
+
+  unitPrice    Decimal
+}
+
+// ---------- الكوبونات التلقائية ----------
+model Coupon {
+  id          String   @id @default(cuid())
+  code        String   @unique
+  customerId  String?
+  customer    Customer? @relation(fields: [customerId], references: [id])
+  percentOff  Int      @default(10)
+  isUsed      Boolean  @default(false)
+  expiresAt   DateTime
+  createdAt   DateTime @default(now())
+  // يُنشأ تلقائياً عبر trigger في الباك إند عند: totalAmount >= 10000
+}
