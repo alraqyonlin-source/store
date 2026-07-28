@@ -6,6 +6,7 @@
   "scripts": {
     "start": "node server.js",
     "dev": "nodemon server.js",
+    "build": "npm install --legacy-peer-deps",
     "prisma:migrate": "prisma migrate dev",
     "prisma:studio": "prisma studio"
   },
